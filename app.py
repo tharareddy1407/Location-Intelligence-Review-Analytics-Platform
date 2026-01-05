@@ -20,13 +20,12 @@ try:
 except Exception:
     pass
 
-
 # -------------------------
 # Page setup
 # -------------------------
 st.set_page_config(page_title="Google Places Review Insights", layout="wide")
 st.title("Google Places Review Insights (Tableau-ready)")
-st.caption("App version: v4.0 (AB search modes + in-app visualizations)")
+st.caption("App version: v4.1 (AB search modes + responsive charts)")
 
 api_key = os.getenv("GOOGLE_MAPS_API_KEY", "").strip()
 if not api_key:
@@ -150,6 +149,38 @@ if suggestions:
 run_btn = st.button("Run Analysis")
 
 # -------------------------
+# Chart helpers (responsive sizing)
+# -------------------------
+def show_bar(title: str, x_labels, y_values, xlabel: str, ylabel: str, figsize=(5, 3)):
+    fig, ax = plt.subplots(figsize=figsize)
+    ax.bar([str(x) for x in x_labels], list(y_values))
+    ax.set_title(title)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    st.pyplot(fig, use_container_width=True)
+    plt.close(fig)
+
+
+def show_pie(title: str, labels, values, figsize=(4, 4)):
+    fig, ax = plt.subplots(figsize=figsize)
+    ax.pie(list(values), labels=[str(l) for l in labels], autopct="%1.1f%%", startangle=90)
+    ax.set_title(title)
+    st.pyplot(fig, use_container_width=True)
+    plt.close(fig)
+
+
+def show_line(title: str, x_labels, y_values, xlabel: str, ylabel: str, figsize=(6, 3)):
+    fig, ax = plt.subplots(figsize=figsize)
+    ax.plot([str(x) for x in x_labels], list(y_values))
+    ax.set_title(title)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    ax.tick_params(axis="x", rotation=45)
+    st.pyplot(fig, use_container_width=True)
+    plt.close(fig)
+
+
+# -------------------------
 # Run analysis
 # -------------------------
 if run_btn:
@@ -248,7 +279,7 @@ if run_btn:
         st.warning("No places found within the selected radius. Try increasing radius or changing keyword.")
         st.stop()
 
-    # Preview nearest 10
+    # Nearest places preview
     if places and places[0].get("distance_miles") is not None:
         nearest_df = pd.DataFrame(places)[["name", "vicinity", "distance_miles"]].copy()
         nearest_df["distance_miles"] = nearest_df["distance_miles"].astype(float).round(2)
@@ -290,35 +321,37 @@ if run_btn:
     k3.metric("Avg Rating", round(float(reviews_df["rating"].mean()), 2) if "rating" in reviews_df else 0.0)
     k4.metric("Unique Authors", int(reviews_df["author"].nunique()) if "author" in reviews_df else 0)
 
-    # Sentiment distribution (Bar + Pie)
+    # Sentiment charts
     if "sentiment" in tableau_df.columns:
         st.subheader("Sentiment Distribution")
-
         sentiment_counts = tableau_df["sentiment"].value_counts()
-
-        fig1 = plt.figure()
-        plt.bar(sentiment_counts.index.astype(str), sentiment_counts.values)
-        plt.xlabel("Sentiment")
-        plt.ylabel("Count")
-        plt.title("Sentiment (Bar)")
-        st.pyplot(fig1)
-
-        fig2 = plt.figure()
-        plt.pie(sentiment_counts.values, labels=sentiment_counts.index.astype(str), autopct="%1.1f%%")
-        plt.title("Sentiment Share (Pie)")
-        st.pyplot(fig2)
+        show_bar(
+            title="Sentiment Distribution (Bar)",
+            x_labels=sentiment_counts.index,
+            y_values=sentiment_counts.values,
+            xlabel="Sentiment",
+            ylabel="Count",
+            figsize=(5, 3),
+        )
+        show_pie(
+            title="Sentiment Share (Pie)",
+            labels=sentiment_counts.index,
+            values=sentiment_counts.values,
+            figsize=(4, 4),
+        )
 
     # Rating distribution
     if "rating" in reviews_df.columns:
         st.subheader("Rating Distribution (1–5)")
         rating_counts = reviews_df["rating"].value_counts().sort_index()
-
-        fig3 = plt.figure()
-        plt.bar(rating_counts.index.astype(str), rating_counts.values)
-        plt.xlabel("Rating")
-        plt.ylabel("Count")
-        plt.title("Ratings Distribution")
-        st.pyplot(fig3)
+        show_bar(
+            title="Rating Distribution",
+            x_labels=rating_counts.index,
+            y_values=rating_counts.values,
+            xlabel="Rating",
+            ylabel="Count",
+            figsize=(5, 3),
+        )
 
     # Top stores by negative reviews
     if {"restaurant_name", "sentiment"}.issubset(tableau_df.columns):
@@ -327,7 +360,7 @@ if run_btn:
         top_neg = neg.groupby("restaurant_name").size().sort_values(ascending=False).head(10)
         st.dataframe(top_neg.reset_index(name="negative_reviews"), use_container_width=True)
 
-    # Reviews over time (if a datetime column exists)
+    # Reviews over time
     date_col = None
     for c in ["date_utc", "date", "review_date"]:
         if c in tableau_df.columns:
@@ -342,14 +375,14 @@ if run_btn:
 
         if not tmp.empty:
             daily = tmp.groupby(tmp[date_col].dt.date).size()
-
-            fig4 = plt.figure()
-            plt.plot(daily.index.astype(str), daily.values)
-            plt.xticks(rotation=45, ha="right")
-            plt.xlabel("Date")
-            plt.ylabel("Reviews")
-            plt.title("Reviews Over Time")
-            st.pyplot(fig4)
+            show_line(
+                title="Reviews Over Time",
+                x_labels=daily.index,
+                y_values=daily.values,
+                xlabel="Date",
+                ylabel="Reviews",
+                figsize=(6, 3),
+            )
 
     # -------------------------
     # Preview + downloads
