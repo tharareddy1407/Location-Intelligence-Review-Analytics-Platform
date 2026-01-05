@@ -1,5 +1,6 @@
 # app.py
 import os
+import math
 import pandas as pd
 import streamlit as st
 
@@ -17,11 +18,13 @@ try:
 except Exception:
     pass
 
+
 # -------------------------
 # Streamlit page setup
 # -------------------------
 st.set_page_config(page_title="Google Places Review Insights", layout="wide")
 st.title("Google Places Review Insights (Tableau-ready)")
+st.caption("App version: v2.1 radius-filter + address enrichment")
 
 # Validate API key early
 api_key = os.getenv("GOOGLE_MAPS_API_KEY", "").strip()
@@ -33,26 +36,31 @@ settings = load_settings()
 client = HttpClient(timeout_sec=settings.timeout_sec, sleep_sec=settings.sleep_between_requests_sec)
 
 # -------------------------
-# Session state (prevents stale runs)
+# Session state
 # -------------------------
-if "last_run_signature" not in st.session_state:
-    st.session_state.last_run_signature = None
-
 if "run_counter" not in st.session_state:
     st.session_state.run_counter = 0
 
-col_reset, col_spacer = st.columns([1, 5])
-with col_reset:
-    if st.button("Reset / New Search"):
-        st.session_state.last_run_signature = None
-        st.session_state.run_counter = 0
-        st.rerun()
+if st.button("Reset / New Search"):
+    st.session_state.run_counter = 0
+    st.rerun()
 
 # -------------------------
 # Helpers: Autocomplete + Resolve + Geocode
 # -------------------------
 AUTOCOMPLETE_URL = "https://maps.googleapis.com/maps/api/place/autocomplete/json"
 DETAILS_URL = "https://maps.googleapis.com/maps/api/place/details/json"
+
+EARTH_RADIUS_M = 6371000.0
+
+
+def haversine_m(lat1, lon1, lat2, lon2) -> float:
+    """Distance between two coords in meters."""
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
+    return 2 * EARTH_RADIUS_M * math.asin(math.sqrt(a))
 
 
 def parse_components(address_components: list) -> dict:
@@ -102,7 +110,6 @@ def geocode_address(address: str):
         raise RuntimeError(f"Geocode error: status={status}, msg={data.get('error_message')}")
     loc = data["results"][0]["geometry"]["location"]
     formatted = data["results"][0].get("formatted_address")
-    # Geocode response doesn't always include ZIP cleanly for city-only searches
     return float(loc["lat"]), float(loc["lng"]), formatted
 
 
@@ -133,7 +140,6 @@ if suggestions:
         format_func=lambda x: x["description"],
         key="location_selectbox",
     )
-
     if selected and selected.get("place_id"):
         try:
             resolved = resolve_place(selected["place_id"])
@@ -146,19 +152,9 @@ run_btn = st.button("Run Analysis")
 # Run Analysis
 # -------------------------
 if run_btn:
-    # Create a run signature so a new radius/keyword triggers a fresh run
-    run_signature = {
-        "address_input": user_input.strip(),
-        "selected_place_id": (selected.get("place_id") if selected else None),
-        "keyword": keyword.strip().lower(),
-        "radius_miles": float(radius_miles),
-    }
-
-    # Always treat a click as a new run; but keep signature for debugging/staleness checks
-    st.session_state.last_run_signature = run_signature
     st.session_state.run_counter += 1
 
-    # Resolve address -> lat/lon + display normalized address
+    # Resolve address -> lat/lon + normalized display
     try:
         if resolved:
             loc = (resolved.get("geometry") or {}).get("location") or {}
@@ -179,41 +175,63 @@ if run_btn:
         st.stop()
 
     # Convert user radius
-    radius_m = miles_to_meters(radius_miles)
+    user_radius_m = miles_to_meters(radius_miles)
 
-    # Tile radius is an internal search chunk size; keep it <= Google cap
+    # Internal tile radius: chunk size for Google Nearby Search (Google max 50km)
     tile_radius_m = min(settings.tile_radius_m, settings.max_nearby_radius_m)
 
-    # If the user's radius is small, don't tile (one center is enough)
-    if radius_m <= tile_radius_m:
+    # Tile only when needed
+    if user_radius_m <= tile_radius_m:
         tile_centers = [(lat, lon)]
     else:
-        tile_centers = generate_tile_centers(lat, lon, radius_m=radius_m, tile_radius_m=tile_radius_m)
+        tile_centers = generate_tile_centers(lat, lon, radius_m=user_radius_m, tile_radius_m=tile_radius_m)
 
-    # IMPORTANT: use the user's radius for Nearby Search when it's smaller than tile size
-    search_radius_m = int(min(radius_m, tile_radius_m))
+    # Search radius used per tile (should not exceed user's radius)
+    search_radius_m = int(min(user_radius_m, tile_radius_m))
 
     st.info(
         f"Center: {lat:.5f}, {lon:.5f} | "
         f"User radius: {radius_miles:.1f} miles | "
         f"Tiles: {len(tile_centers)} | "
-        f"Search radius used: {search_radius_m / 1609.344:.1f} miles | "
+        f"Search radius used: {search_radius_m/1609.344:.1f} miles | "
         f"Run #{st.session_state.run_counter}"
     )
 
-    # Collect places
-    with st.spinner("Collecting places (Nearby Search)..."):
+    # Collect places (Nearby Search) + TRUE radius filter
+    with st.spinner("Collecting places (Nearby Search) + filtering by your radius..."):
         try:
-            places = collect_places(client, settings, tile_centers, search_radius_m, keyword.strip())
+            places = collect_places(
+                client,
+                settings,
+                tile_centers,
+                search_radius_m,
+                keyword.strip(),
+                filter_center=(lat, lon),
+                filter_radius_m=user_radius_m,  # ✅ strict filter
+            )
+        except TypeError:
+            st.error(
+                "Your src/places_collector.py does not support radius filtering yet.\n\n"
+                "Update collect_places(...) to accept filter_center and filter_radius_m as shown previously."
+            )
+            st.stop()
         except Exception as e:
             st.error(f"Failed collecting places: {e}")
             st.stop()
 
-    st.success(f"Places collected: {len(places)}")
+    # Show radius-filter result summary
+    st.success(f"Places within {radius_miles:.1f} miles: {len(places)}")
 
     if not places:
-        st.warning("No places found. Try increasing radius or changing keyword.")
+        st.warning("No places found within the selected radius. Try increasing radius or changing keyword.")
         st.stop()
+
+    # Extra: show nearest 10 (distance validation)
+    if places and places[0].get("distance_miles") is not None:
+        preview_df = pd.DataFrame(places)[["name", "vicinity", "distance_miles"]].copy()
+        preview_df["distance_miles"] = preview_df["distance_miles"].astype(float).round(2)
+        st.subheader("Nearest places (distance check)")
+        st.dataframe(preview_df.head(10), use_container_width=True)
 
     # Collect reviews + store addresses
     with st.spinner("Collecting reviews + store addresses (Place Details)..."):
@@ -227,7 +245,10 @@ if run_btn:
     reviews_df = pd.DataFrame(results["reviews"])
 
     if reviews_df.empty:
-        st.warning("No reviews returned for the found places. (Google often provides only a small set of reviews.)")
+        st.warning(
+            "No reviews returned for the found places. "
+            "(Google often provides only a small set of reviews per place.)"
+        )
         st.download_button(
             "Download places.csv",
             places_df.to_csv(index=False).encode("utf-8"),

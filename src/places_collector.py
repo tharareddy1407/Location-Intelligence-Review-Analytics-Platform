@@ -1,9 +1,20 @@
 # src/places_collector.py
 import time
-from typing import Dict, List, Set, Tuple
+import math
+from typing import Dict, List, Set, Tuple, Optional
 
 from .config import Settings
 from .http_client import HttpClient
+
+EARTH_RADIUS_M = 6371000.0
+
+def haversine_m(lat1, lon1, lat2, lon2) -> float:
+    """Distance in meters."""
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
+    a = math.sin(dphi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dlambda/2)**2
+    return 2 * EARTH_RADIUS_M * math.asin(math.sqrt(a))
 
 def nearby_search_tile(
     client: HttpClient,
@@ -28,7 +39,6 @@ def nearby_search_tile(
         status = data.get("status")
 
         if status not in ("OK", "ZERO_RESULTS"):
-            # Common: OVER_QUERY_LIMIT, REQUEST_DENIED, INVALID_REQUEST
             raise RuntimeError(f"Nearby Search error: status={status}, msg={data.get('error_message')}")
 
         results = data.get("results", []) or []
@@ -39,7 +49,6 @@ def nearby_search_tile(
         if not token or page >= settings.max_pages_per_tile:
             break
 
-        # token needs a short wait before it becomes valid
         time.sleep(settings.next_page_token_wait_sec)
         params["pagetoken"] = token
 
@@ -49,36 +58,61 @@ def collect_places(
     client: HttpClient,
     settings: Settings,
     tile_centers: List[Tuple[float, float]],
-    tile_radius_m: int,
+    search_radius_m: int,
     keyword: str,
+    # NEW: true radius filter
+    filter_center: Optional[Tuple[float, float]] = None,
+    filter_radius_m: Optional[float] = None,
 ) -> List[Dict]:
     """
     Returns unique place rows:
-      { place_id, name, vicinity, lat, lon, types }
+      { place_id, name, vicinity, lat, lon, types, distance_m, distance_miles }
+    If filter_center + filter_radius_m are provided, results are filtered to that radius.
     """
     seen: Set[str] = set()
     places: List[Dict] = []
 
-    for i, (lat, lon) in enumerate(tile_centers, start=1):
-        results = nearby_search_tile(client, settings, lat, lon, tile_radius_m, keyword)
+    c_lat, c_lon = (filter_center if filter_center else (None, None))
+
+    for (lat, lon) in tile_centers:
+        results = nearby_search_tile(client, settings, lat, lon, search_radius_m, keyword)
 
         for p in results:
             pid = p.get("place_id")
             if not pid or pid in seen:
                 continue
-            seen.add(pid)
 
             geo = p.get("geometry", {}).get("location", {}) or {}
+            p_lat = geo.get("lat")
+            p_lon = geo.get("lng")
+            if p_lat is None or p_lon is None:
+                continue
+
+            # Compute distance from chosen center (if provided)
+            dist_m = None
+            dist_miles = None
+            if filter_center and filter_radius_m is not None:
+                dist_m = haversine_m(c_lat, c_lon, p_lat, p_lon)
+                if dist_m > filter_radius_m:
+                    continue  # outside user radius
+                dist_miles = dist_m / 1609.344
+
+            seen.add(pid)
             places.append({
                 "place_id": pid,
                 "name": p.get("name"),
                 "vicinity": p.get("vicinity"),
-                "lat": geo.get("lat"),
-                "lon": geo.get("lng"),
+                "lat": p_lat,
+                "lon": p_lon,
                 "types": ",".join(p.get("types", []) or []),
+                "distance_m": dist_m,
+                "distance_miles": dist_miles,
             })
 
-        # light pacing between tiles
         time.sleep(settings.sleep_between_requests_sec)
+
+    # Sort by distance when available (closest first)
+    if filter_center and filter_radius_m is not None:
+        places.sort(key=lambda x: (x["distance_m"] is None, x["distance_m"]))
 
     return places
