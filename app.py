@@ -25,7 +25,7 @@ except Exception:
 # -------------------------
 st.set_page_config(page_title="Location Intelligence & Review Analytics Platform", layout="wide")
 st.title("Location Intelligence & Review Analytics Platform")
-st.caption("App version: v4.1 (AB search modes + responsive charts)")
+st.caption("A geo-enabled platform for discovering businesses, analyzing customer reviews, and generating actionable business insights")
 
 api_key = os.getenv("GOOGLE_MAPS_API_KEY", "").strip()
 if not api_key:
