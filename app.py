@@ -1,7 +1,9 @@
 # app.py
 import os
+import math
 import pandas as pd
 import streamlit as st
+import matplotlib.pyplot as plt
 
 from src.config import load_settings
 from src.http_client import HttpClient
@@ -24,7 +26,7 @@ except Exception:
 # -------------------------
 st.set_page_config(page_title="Google Places Review Insights", layout="wide")
 st.title("Google Places Review Insights (Tableau-ready)")
-st.caption("App version: v3.0 (AB modes: Brand Search + Geo Coverage)")
+st.caption("App version: v4.0 (AB search modes + in-app visualizations)")
 
 api_key = os.getenv("GOOGLE_MAPS_API_KEY", "").strip()
 if not api_key:
@@ -37,15 +39,21 @@ client = HttpClient(timeout_sec=settings.timeout_sec, sleep_sec=settings.sleep_b
 if "run_counter" not in st.session_state:
     st.session_state.run_counter = 0
 
-if st.button("Reset / New Search"):
-    st.session_state.run_counter = 0
-    st.rerun()
-
 # -------------------------
 # Helpers: Autocomplete + Resolve + Geocode
 # -------------------------
 AUTOCOMPLETE_URL = "https://maps.googleapis.com/maps/api/place/autocomplete/json"
 DETAILS_URL = "https://maps.googleapis.com/maps/api/place/details/json"
+EARTH_RADIUS_M = 6371000.0
+
+
+def haversine_m(lat1, lon1, lat2, lon2) -> float:
+    """Distance between two coords in meters."""
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
+    return 2 * EARTH_RADIUS_M * math.asin(math.sqrt(a))
 
 
 def parse_components(address_components: list) -> dict:
@@ -71,11 +79,7 @@ def get_address_suggestions(user_input: str, limit: int = 6):
 
 
 def resolve_place(place_id: str) -> dict:
-    params = {
-        "place_id": place_id,
-        "fields": "formatted_address,address_component,geometry",
-        "key": settings.api_key,
-    }
+    params = {"place_id": place_id, "fields": "formatted_address,address_component,geometry", "key": settings.api_key}
     data = client.get_json(DETAILS_URL, params=params)
     status = data.get("status")
     if status != "OK":
@@ -95,6 +99,15 @@ def geocode_address(address: str):
 
 
 # -------------------------
+# Reset
+# -------------------------
+col_a, col_b = st.columns([1, 5])
+with col_a:
+    if st.button("Reset / New Search"):
+        st.session_state.run_counter = 0
+        st.rerun()
+
+# -------------------------
 # UI inputs
 # -------------------------
 search_mode = st.selectbox(
@@ -109,7 +122,7 @@ user_input = st.text_input("City/Address", "Plano, TX")
 keyword = st.text_input("Keyword (restaurant, mcdonalds, pizza...)", "mcdonalds")
 radius_miles = st.number_input("Radius (miles)", min_value=1, max_value=200, value=10, step=1)
 
-st.caption("Tip: Type at least 3 characters to see address suggestions. Select one for a normalized address.")
+st.caption("Tip: Type at least 3 characters to see suggestions and select the best match.")
 
 suggestions = []
 selected = None
@@ -142,7 +155,7 @@ run_btn = st.button("Run Analysis")
 if run_btn:
     st.session_state.run_counter += 1
 
-    # Resolve to center lat/lon
+    # Resolve center lat/lon
     try:
         if resolved:
             loc = (resolved.get("geometry") or {}).get("location") or {}
@@ -164,7 +177,6 @@ if run_btn:
 
     user_radius_m = miles_to_meters(radius_miles)
 
-    # Explain limits for large radii
     if radius_miles > 25:
         st.warning(
             "Note: Google Places returns a ranked subset per query (not guaranteed complete coverage). "
@@ -172,18 +184,13 @@ if run_btn:
         )
 
     # -------------------------
-    # MODE B: Text Search (Brand Search)
+    # MODE B: Text Search
     # -------------------------
     if search_mode.startswith("B)"):
-        # Build query that works well for brands
-        # Example: "mcdonalds near Plano, TX, USA"
         query = f"{keyword.strip()} near {formatted_address or user_input.strip()}"
-
         st.info(
-            f"Mode: Brand Search (Text Search) | "
-            f"Query: {query} | "
-            f"User radius: {radius_miles:.1f} miles | "
-            f"Run #{st.session_state.run_counter}"
+            f"Mode: Brand Search (Text Search) | Query: {query} | "
+            f"User radius: {radius_miles:.1f} miles | Run #{st.session_state.run_counter}"
         )
 
         with st.spinner("Collecting places (Text Search) + radius filtering..."):
@@ -202,13 +209,11 @@ if run_btn:
         st.success(f"Places within {radius_miles:.1f} miles (Text Search): {len(places)}")
 
     # -------------------------
-    # MODE A: Geo Coverage (Tiled Nearby Search)
+    # MODE A: Geo Coverage (Tiled Nearby)
     # -------------------------
     else:
-        # Tile radius is an internal chunk size (must stay <= Google nearby cap)
         tile_radius_m = min(settings.tile_radius_m, settings.max_nearby_radius_m)
 
-        # If large radius, you get more tiles; if small radius, 1 tile
         if user_radius_m <= tile_radius_m:
             tile_centers = [(lat, lon)]
         else:
@@ -217,9 +222,8 @@ if run_btn:
         search_radius_m = int(min(user_radius_m, tile_radius_m))
 
         st.info(
-            f"Mode: Geo Coverage (Tiled Nearby) | "
-            f"User radius: {radius_miles:.1f} miles | Tiles: {len(tile_centers)} | "
-            f"Per-tile search radius: {search_radius_m/1609.344:.1f} miles | "
+            f"Mode: Geo Coverage (Tiled Nearby) | User radius: {radius_miles:.1f} miles | "
+            f"Tiles: {len(tile_centers)} | Per-tile radius: {search_radius_m/1609.344:.1f} miles | "
             f"Run #{st.session_state.run_counter}"
         )
 
@@ -234,28 +238,22 @@ if run_btn:
                     filter_center=(lat, lon),
                     filter_radius_m=user_radius_m,
                 )
-            except TypeError:
-                st.error(
-                    "Your src/places_collector.py is not updated to support filter_center/filter_radius_m.\n\n"
-                    "Update it to the radius-filter version I provided earlier."
-                )
-                st.stop()
             except Exception as e:
                 st.error(f"Geo Coverage failed: {e}")
                 st.stop()
 
         st.success(f"Places within {radius_miles:.1f} miles (Geo Coverage): {len(places)}")
 
-    # Show nearest 10 for sanity check
+    if not places:
+        st.warning("No places found within the selected radius. Try increasing radius or changing keyword.")
+        st.stop()
+
+    # Preview nearest 10
     if places and places[0].get("distance_miles") is not None:
         nearest_df = pd.DataFrame(places)[["name", "vicinity", "distance_miles"]].copy()
         nearest_df["distance_miles"] = nearest_df["distance_miles"].astype(float).round(2)
         st.subheader("Nearest places (distance check)")
         st.dataframe(nearest_df.head(10), use_container_width=True)
-
-    if not places:
-        st.warning("No places found within the selected radius. Try increasing radius or changing keyword.")
-        st.stop()
 
     # Reviews + store addresses
     with st.spinner("Collecting reviews + store addresses (Place Details)..."):
@@ -269,9 +267,7 @@ if run_btn:
     reviews_df = pd.DataFrame(results["reviews"])
 
     if reviews_df.empty:
-        st.warning(
-            "No reviews returned for the found places. Google often returns only a small set of reviews per place."
-        )
+        st.warning("No reviews returned. Google often returns only a limited set of reviews per place.")
         st.download_button(
             "Download places.csv",
             places_df.to_csv(index=False).encode("utf-8"),
@@ -282,6 +278,82 @@ if run_btn:
 
     tableau_df = add_insights(reviews_df)
 
+    # -------------------------
+    # VISUALIZATIONS
+    # -------------------------
+    st.markdown("## 📊 Visualizations (Business Insights)")
+
+    # KPI cards
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Places", places_df["place_id"].nunique() if "place_id" in places_df else len(places_df))
+    k2.metric("Reviews", len(reviews_df))
+    k3.metric("Avg Rating", round(float(reviews_df["rating"].mean()), 2) if "rating" in reviews_df else 0.0)
+    k4.metric("Unique Authors", int(reviews_df["author"].nunique()) if "author" in reviews_df else 0)
+
+    # Sentiment distribution (Bar + Pie)
+    if "sentiment" in tableau_df.columns:
+        st.subheader("Sentiment Distribution")
+
+        sentiment_counts = tableau_df["sentiment"].value_counts()
+
+        fig1 = plt.figure()
+        plt.bar(sentiment_counts.index.astype(str), sentiment_counts.values)
+        plt.xlabel("Sentiment")
+        plt.ylabel("Count")
+        plt.title("Sentiment (Bar)")
+        st.pyplot(fig1)
+
+        fig2 = plt.figure()
+        plt.pie(sentiment_counts.values, labels=sentiment_counts.index.astype(str), autopct="%1.1f%%")
+        plt.title("Sentiment Share (Pie)")
+        st.pyplot(fig2)
+
+    # Rating distribution
+    if "rating" in reviews_df.columns:
+        st.subheader("Rating Distribution (1–5)")
+        rating_counts = reviews_df["rating"].value_counts().sort_index()
+
+        fig3 = plt.figure()
+        plt.bar(rating_counts.index.astype(str), rating_counts.values)
+        plt.xlabel("Rating")
+        plt.ylabel("Count")
+        plt.title("Ratings Distribution")
+        st.pyplot(fig3)
+
+    # Top stores by negative reviews
+    if {"restaurant_name", "sentiment"}.issubset(tableau_df.columns):
+        st.subheader("Top Stores by Negative Reviews (Top 10)")
+        neg = tableau_df[tableau_df["sentiment"] == "Negative"]
+        top_neg = neg.groupby("restaurant_name").size().sort_values(ascending=False).head(10)
+        st.dataframe(top_neg.reset_index(name="negative_reviews"), use_container_width=True)
+
+    # Reviews over time (if a datetime column exists)
+    date_col = None
+    for c in ["date_utc", "date", "review_date"]:
+        if c in tableau_df.columns:
+            date_col = c
+            break
+
+    if date_col:
+        st.subheader("Review Volume Over Time")
+        tmp = tableau_df.copy()
+        tmp[date_col] = pd.to_datetime(tmp[date_col], errors="coerce")
+        tmp = tmp.dropna(subset=[date_col])
+
+        if not tmp.empty:
+            daily = tmp.groupby(tmp[date_col].dt.date).size()
+
+            fig4 = plt.figure()
+            plt.plot(daily.index.astype(str), daily.values)
+            plt.xticks(rotation=45, ha="right")
+            plt.xlabel("Date")
+            plt.ylabel("Reviews")
+            plt.title("Reviews Over Time")
+            st.pyplot(fig4)
+
+    # -------------------------
+    # Preview + downloads
+    # -------------------------
     st.subheader("Preview: Tableau-ready data (includes store address + ZIP)")
     st.dataframe(tableau_df.head(50), use_container_width=True)
 
