@@ -47,7 +47,7 @@ EARTH_RADIUS_M = 6371000.0
 
 
 def haversine_m(lat1, lon1, lat2, lon2) -> float:
-    """Distance between two coords in meters."""
+    """Distance between two coords in meters"""
     phi1, phi2 = math.radians(lat1), math.radians(lat2)
     dphi = math.radians(lat2 - lat1)
     dlambda = math.radians(lon2 - lon1)
