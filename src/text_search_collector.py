@@ -9,13 +9,20 @@ from .http_client import HttpClient
 EARTH_RADIUS_M = 6371000.0
 
 
-def haversine_m(lat1, lon1, lat2, lon2) -> float:
-    """Distance in meters."""
+def haversine_miles(lat1, lon1, lat2, lon2) -> float:
+    """Distance in miles."""
     phi1, phi2 = math.radians(lat1), math.radians(lat2)
     dphi = math.radians(lat2 - lat1)
     dlambda = math.radians(lon2 - lon1)
-    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
-    return 2 * EARTH_RADIUS_M * math.asin(math.sqrt(a))
+
+    a = (
+        math.sin(dphi / 2) ** 2
+        + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
+    )
+
+    distance_meters = 2 * EARTH_RADIUS_M * math.asin(math.sqrt(a))
+    return distance_meters / 1609.344
+
 
 
 def text_search_pages(
