@@ -4,6 +4,8 @@ import math
 import pandas as pd
 import streamlit as st
 import matplotlib.pyplot as plt
+from src.geo import haversine_m
+
 
 from src.config import load_settings
 from src.http_client import HttpClient
